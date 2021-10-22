@@ -1,0 +1,265 @@
+---
+title: "FWS Beringian Seabird 2004"
+author: "Alberto Rovellini"
+date: "9/28/2021"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(sf)
+library(maps)
+library(mapdata)
+library(rbgm)
+library(viridis)
+library(data.table)
+```
+
+```{r}
+select <- dplyr::select
+```
+
+This document explores and maps to Atlantis the data from the [FWS Beringian Seabird 2004](https://seamap.env.duke.edu/dataset/270). For some details about the data set and previous analyses, see [Stephenson and Irons (2003)](http://marineornithology.org/PDF/31_2/31_2_167-173.pdf). 
+
+# Read data and explore
+
+Read the Beringian Seabird dataset and the Atlantis geometry.
+```{r}
+dat <- read.csv('../data/obis_seamap_dataset_270_csv_34967/obis_seamap_dataset_270_points.csv')
+# BGM
+atlantis_bgm <- read_bgm('../data/GOA_WGS84_V4_final.bgm')
+atlantis_box <- atlantis_bgm %>% box_sf()
+# utilities
+atlantis_crs <- atlantis_bgm$extra$projection
+atlantis_bbox <- atlantis_box %>% st_bbox()
+```
+
+The structure of this data set is not very clear. It includes 4,334 observations, versus the 7,409 records from the online version. In addition, metadata accessible [here](https://seamap.env.duke.edu/dataset/270) mention attributes between the columns 'survey' and 'oid', with everything contained in the first half of the columns of the data set being reported in the 'Dataset on map' metadata instead. The latter appears to be fewer data points. Test.
+
+```{r}
+length(unique(dat$longitude))
+length(unique(dat$lon))
+```
+
+The latter seems to capture many more data points. For now discard columns until 'survey', except for those that are useful for the names, which we use to make a key. Also drop all observations from Russia.
+```{r}
+my_dat <- dat %>% select(survey:tomu) # tomu seems to be the last species. Drop the column 'Birds', because it does not seem to be consistent with the number of birds at each colony. Drop the column 'Excluded' because it is all False
+
+# make a key for species names to use later
+name_key <- dat %>% select(species_name:common_name) %>% distinct() %>% arrange(species_name)
+
+# now filter out russia
+my_dat <- my_dat %>%  filter(survey == 'AK') # AK_P denotes presence-absence records
+```
+
+Also replace NA's with zeroes, which makes the assumption that is a species does not have an entry at a certain site it was not present there, and thus absent. Reshape in long format.
+```{r}
+my_dat[is.na(my_dat)]<-0
+
+my_dat <- my_dat %>% rowwise() %>%
+  mutate(Total = sum(c_across(nofu:tomu)))
+
+my_dat_long <- my_dat %>% pivot_longer(cols = nofu:Total)
+```
+
+Do some mapping. By total birds first, just to see where the data points are.
+```{r,fig.width=8, fig.height=5}
+my_dat_sf <- my_dat_long %>% st_as_sf(coords=c('lon','lat'), crs = 4326) %>%
+  st_transform(crs = atlantis_crs)
+
+# get some coastlines
+coast <- maps::map(database = 'worldHires', regions = c('USA','Canada'), plot = FALSE, fill=TRUE)
+coast_sf <- coast %>% st_as_sf(crs = 4326) %>% st_transform(crs = atlantis_crs) %>% st_combine()
+
+p<- my_dat_sf %>% 
+  filter(name=='Total') %>%
+  ggplot() +
+  geom_sf(data=coast_sf)+
+  geom_sf(aes(color=log1p(value)), size = 2)+
+  scale_color_viridis()+
+  coord_sf(xlim=c(atlantis_bbox$xmin, atlantis_bbox$xmax),ylim=c(atlantis_bbox$ymin, atlantis_bbox$ymax+50000))+
+  theme_bw()+
+  labs(title='Total bird abundance by colony from FWS Beringian Seabird 2004', color='Log-counts')
+p
+
+#ggsave('beringian_data.png', p, dpi=600, width=8.5, height=5)
+```
+
+Append scientific and common names to the 4-letter acronyms from this data set. Use the key we derived above.
+```{r}
+# write function that takes name and maps scientific and common name
+bird_names <- function(code,scientific){
+  this_row <- grep(code,name_key$species_name,ignore.case = TRUE)
+  this_name <- ifelse(isTRUE(scientific),name_key$scientific_name[this_row],name_key$common_name[this_row])
+  this_name
+}
+
+my_dat_sf <- my_dat_sf %>% mutate(scientific_name = purrr::pmap_chr(list(name),bird_names,TRUE),
+                                    common_name = purrr::pmap_chr(list(name),bird_names,FALSE))
+```
+
+# Map to Atlantis
+
+Get for each data point which box it belongs to.
+```{r}
+box_join <- my_dat_sf %>% st_join(atlantis_box %>% select(.bx0,boundary))
+box_join <- box_join[which(!is.na(box_join$.bx0)),] # drop everything that does not match a box
+
+# group by box and by species and *sum* numbers. Where are the birds??
+box_join_sum <- box_join %>% group_by(.bx0,name,scientific_name,common_name) %>% summarise(box_total = sum(value,na.rm=TRUE))
+
+# now join with box data set so that we can map this
+box_join_tot <- atlantis_box %>% left_join(box_join_sum %>% st_set_geometry(NULL), by = '.bx0')
+```
+
+Have a look.
+```{r,fig.width =12, fig.height=30}
+box_join_tot %>% ggplot()+
+  geom_sf(aes(fill=log1p(box_total)))+
+  scale_fill_viridis()+
+  geom_sf(data=coast_sf)+
+  coord_sf(xlim=c(atlantis_bbox$xmin, atlantis_bbox$xmax),ylim=c(atlantis_bbox$ymin, atlantis_bbox$ymax))+
+  theme_minimal()+
+  facet_wrap(~name,ncol=3)
+```
+
+# Map species to Atlantis groups
+
+This is going to require a key. The key will not include all the species included in this dataset, and it may warrant dropping some of them. Compare the abundances in the data with what we have in Guenette and Kerim's Ecopath models.
+
+Workflow:
+
+1. Read in the list of species from Guenette (2005) of abundant GOA seabirds.
+2. Map the species to these and read in the foraging range.
+3. For each colony $C_{i}$ (pair of coordinates), draw a buffer of radius equal to the foraging distance.
+4. Read in the land polygon for US and Canada and combine it.
+5. For each $C_{i}$, calculate $Cintersect_{i} = C_{i} \cap notLand$ and calculate the area of each $Cintersect_{i}$.
+6. For each $Cintersect_{i}$ and each Atlantis box $box_{j}$, calculate the proportion of birds numbers from that colony that fall into that box as $S_{i,j} = [box_{j} \cap Cintersect_{i}]/Cintersect_{i}$.
+7. Calculate the number of birds in that box from that colony as $N_{i,j} = S_{i,j}*N_{i}$
+8. Map species to Atlantis groups according to the key in the Guenette spreadsheet.
+9. Add up numbers from all colonies for each box for each group.
+
+This should eventually leave us with number of birds per Atlantis box, allocated from the colonies. We can then divide by areas of the box to have a sense of the density, and compute numbers per box as proportion of the total, etc.
+
+__IMPORTANT__: here we are making a heavy assumption: if a species has a foraging range of 100 km from the colony and the colony counts 1000 individuals, we are assuming that the density in the 100 km radius is $1000/\pi100^2$. This is not the case, as many birds may stay much closer to the colony than their foraging range. I tried to alleviate this by recording the average feeding range from references within [birdsoftheworld.org](https://birdsoftheworld.org/bow/home). However, assuming constant density is a big simplification.
+```{r}
+key_tmp <- read.csv('../data/Guenette.csv', fileEncoding = 'UTF-8-BOM')
+key_tmp <- key_tmp[-nrow(key_tmp),] # drop the last row because it is empty
+key_tmp$Common.name <- gsub('storm-petrel','storm petrel', key_tmp$Common.name) # fix the storm petrels
+key_tmp$Proposed.group <- gsub(', ','_', key_tmp$Proposed.group) # remove commas from the Proposed.Group
+key_tmp <- key_tmp %>% mutate(Common.name = tolower(Common.name))
+
+key <- key_tmp %>% select(Common.name,Foraging.distance.km)
+```
+
+How well do the common names match? Avoiding to use the scientific names here because both of these sources would be pretty dated and probably have changed in the meantime.
+```{r}
+species_data <- sort(unique(my_dat_sf$common_name)) # 41
+species_key <- sort(unique(key$Common.name)) # 31
+species <- intersect(tolower(species_data),species_key)
+```
+
+The colony data does not include species that do not nest in Alaska but will come and forage in the model, including albatrosses and Sooty shearwaters. It also does not include Jaegers (unsurprisingly - no species definition in Guenette (2005)), nor phalaropes, and a couple more species. 
+
+Join the colony data with the key. Do all lowercase for better matching.
+```{r}
+my_dat_sf <- my_dat_sf %>% mutate(common_name = tolower(common_name))
+key <- key %>% mutate(common_name = tolower(Common.name)) %>% select(-Common.name)
+
+birds_sf <- my_dat_sf %>% left_join(key, by = 'common_name') %>% filter(!is.na(Foraging.distance.km))
+```
+
+Draw the buffer around each colony.
+```{r,fig.width=10,fig.height=5}
+birds_colonies <- birds_sf %>% st_buffer(dist=birds_sf$Foraging.distance.km*1000)
+
+# intersect each colony with the coast data
+
+colony_at_sea <- birds_colonies %>% st_difference(coast_sf) # this takes time
+colony_at_sea %>% ggplot()+geom_sf()+theme_minimal()+facet_wrap(~name,ncol=3)
+
+p<- colony_at_sea %>% filter(name=='hopu',value>0) %>% ggplot()+
+  geom_sf(aes(fill=log1p(value)),alpha=0.5)+
+  scale_fill_viridis()+
+  geom_sf(data=coast_sf)+
+  coord_sf(xlim=c(atlantis_bbox$xmin, atlantis_bbox$xmax),ylim=c(atlantis_bbox$ymin, atlantis_bbox$ymax+50000))+
+  theme_minimal()+
+  labs(title='Horned puffin',fill='Log-counts')
+
+#ggsave('hopu.png', p, dpi=600, width=8.5, height=5)
+```
+
+Now compute the area for each of those buffers.
+```{r}
+colony_at_sea <- colony_at_sea %>% mutate(colony_area_at_sea=st_area(colony_at_sea))
+```
+
+Write a function that takes each individual colony geometry and does st_intersect() with each Atlantis box. Bound to take a very long time.
+```{r, warning=FALSE}
+# define a unique identifier for each species at each colony
+colony_at_sea <- colony_at_sea %>% 
+  mutate(ID=paste(mapnumber,sitenumber,name,sep='_')) %>% 
+  select(ID,name,common_name,colony_area_at_sea,value)
+
+all_IDs <- unique(colony_at_sea$ID)
+
+# shed some variables
+box_thin <- atlantis_box %>% select(.bx0,boundary)
+
+# pick a unique ID, calculate the area of the intersection with each atlantis box in the model, and scale the n of ind for that colony by the area of the intersection
+box_colony_overlap <- function(this_colony,colony_data,box_data){
+  
+  this_intersection <- box_data %>% st_intersection(colony_data %>% filter(ID==this_colony))
+  this_intersection <- this_intersection %>% 
+    mutate(colony_box_area = st_area(this_intersection),
+           proportion_of_colony_area = colony_box_area/colony_area_at_sea,
+           abundance_this_box = proportion_of_colony_area*value) %>%
+    st_set_geometry(NULL) 
+    
+  return(this_intersection)
+}
+
+atlantis_abundances <- rbindlist(purrr::map(all_IDs,box_colony_overlap,colony_data=colony_at_sea,box_data=box_thin))
+```
+The last function call above is very slow.
+
+```{r}
+head(atlantis_abundances)
+sum(atlantis_abundances$abundance_this_box)
+```
+
+Group this by species and add up abundances by box. Then tie back to common names and then to Atlantis groups. Then add up by group by box. Should get a 436 row data frame.
+```{r}
+abundance_by_box <- atlantis_abundances %>% group_by(.bx0,name,common_name) %>% summarise(abundance = sum(abundance_this_box)) %>% ungroup()
+
+# tie back to atlantis groups
+abundance_by_box <- abundance_by_box %>% left_join(key_tmp %>% select(Common.name,Proposed.group), by = c('common_name'='Common.name'))
+abundance_by_box <- abundance_by_box %>% group_by(.bx0,Proposed.group) %>% summarise(abundance = sum(abundance)) %>% ungroup()
+```
+
+Join with box set again for the geometry and map.
+```{r, fig.width = 12, fig.height=6}
+atlantis_birds <- atlantis_box %>% select(.bx0,area,boundary) %>% left_join(abundance_by_box, by = '.bx0')
+
+atlantis_birds %>% 
+  rowwise() %>%
+  mutate(abundance = ifelse(isTRUE(boundary),NA,abundance)) %>%
+  ungroup() %>%
+  ggplot()+
+  geom_sf(aes(fill=as.numeric(abundance/area)))+
+  scale_fill_viridis()+
+  geom_sf(data=coast_sf, fill = 'grey')+
+  coord_sf(xlim = c(atlantis_bbox$xmin, atlantis_bbox$xmax), ylim = c(atlantis_bbox$ymin, atlantis_bbox$ymax))+
+  theme_bw()+
+  facet_wrap(~Proposed.group, ncol=2)+
+  labs(title='Seabird density from FWS Beringian Seabird database', fill = expression(paste('Density (ind ',km^-2, ')')))
+```
+Due to the use of the buffers, the total population estimated within the Atlantis domain is ~5.7 million birds, which is less than the estimated 7.2 million mesting seabird in the GOA from [Stephenson and Irons (2003)](http://marineornithology.org/PDF/31_2/31_2_167-173.pdf). Part of the issue is that we are not capturing all species that were present in the original Beringian database. 
