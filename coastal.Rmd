@@ -229,14 +229,14 @@ box_colony_overlap <- function(this_colony,colony_data,box_data){
 
 atlantis_abundances <- rbindlist(purrr::map(all_IDs,box_colony_overlap,colony_data=colony_at_sea,box_data=box_thin))
 ```
-The last function call above is very slow.
+The last function call above is very slow (like think 1 h slow.
 
 ```{r}
 head(atlantis_abundances)
 sum(atlantis_abundances$abundance_this_box)
 ```
 
-Group this by species and add up abundances by box. Then tie back to common names and then to Atlantis groups. Then add up by group by box. Should get a 436 row data frame.
+Group this by species and add up abundances by box. Then tie back to common names and then to Atlantis groups. Then add up by group by box. 
 ```{r}
 abundance_by_box <- atlantis_abundances %>% group_by(.bx0,name,common_name) %>% summarise(abundance = sum(abundance_this_box)) %>% ungroup()
 
@@ -246,20 +246,26 @@ abundance_by_box <- abundance_by_box %>% group_by(.bx0,Proposed.group) %>% summa
 ```
 
 Join with box set again for the geometry and map.
-```{r, fig.width = 12, fig.height=6}
+```{r, fig.width = 10, fig.height=5}
 atlantis_birds <- atlantis_box %>% select(.bx0,area,boundary) %>% left_join(abundance_by_box, by = '.bx0')
 
-atlantis_birds %>% 
+groups <- unique(atlantis_birds$Proposed.group)
+
+p<- atlantis_birds %>% 
   rowwise() %>%
   mutate(abundance = ifelse(isTRUE(boundary),NA,abundance)) %>%
   ungroup() %>%
+  filter(Proposed.group==groups[4]) %>% 
   ggplot()+
-  geom_sf(aes(fill=as.numeric(abundance/area)))+
+  geom_sf(aes(fill=as.numeric(abundance/(area/1000000))))+ # back to km2
   scale_fill_viridis()+
   geom_sf(data=coast_sf, fill = 'grey')+
   coord_sf(xlim = c(atlantis_bbox$xmin, atlantis_bbox$xmax), ylim = c(atlantis_bbox$ymin, atlantis_bbox$ymax))+
   theme_bw()+
-  facet_wrap(~Proposed.group, ncol=2)+
-  labs(title='Seabird density from FWS Beringian Seabird database', fill = expression(paste('Density (ind ',km^-2, ')')))
+  #facet_wrap(~Proposed.group, ncol=1)+
+  labs(title=groups[4], fill = expression(paste('Density (ind ',km^-2, ')')))
+#p
+
+ggsave(paste0(groups[4],'.png'), p, dpi=600, width=10, height=4)
 ```
 Due to the use of the buffers, the total population estimated within the Atlantis domain is ~5.7 million birds, which is less than the estimated 7.2 million mesting seabird in the GOA from [Stephenson and Irons (2003)](http://marineornithology.org/PDF/31_2/31_2_167-173.pdf). Part of the issue is that we are not capturing all species that were present in the original Beringian database. 
