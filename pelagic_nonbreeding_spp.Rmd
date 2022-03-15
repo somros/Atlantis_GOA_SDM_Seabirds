@@ -39,47 +39,36 @@ atlantis_crs <- atlantis_bgm$extra$projection
 atlantis_bbox <- atlantis_box %>% st_bbox()
 ```
 
-Keep only species, code, density, tow, and join with the master key for the transect information - of which we only need coordinates from for now.
-
+Keep only Laysan and black-footed albatross, and Sooty shearwaters.
 ```{r}
-all_species <- unique(dat$Common.Name) # a whole lot of species, although in the GOA there will be fewer
-sort(all_species)
+nonbreeding <- c('LAAL','BFAL','SOSH')
+dat_nb <- dat %>% filter(NPPSD.4.Letter.Code %in% nonbreeding)
 ```
 
 ```{r}
-dat_join <- dat %>% select(Master.Key,Common.Name,NPPSD.4.Letter.Code,Density) %>% 
-  left_join(tows %>% select(Master.Key,Lon,Lat,Year,Month), by = 'Master.Key') %>%
+dat_join <- dat_nb %>% select(Master.Key,Common.Name,NPPSD.4.Letter.Code,Density) %>% 
+  left_join(tows %>% select(Master.Key,Lon,Lat,Year), by = 'Master.Key') %>%
   mutate(Density_num=as.numeric(Density)) %>%
   drop_na() # remove NAs 
-```
-
-Subset to October-March and assume that this is outside the breeding season for most species.
-```{r}
-# dat_join <- dat_join %>% filter(Month %in% c(1,2,3,10,11,12)) %>%
-  select(-Month)
 ```
 
 # Map to Atlantis groups
 
 We need to match species with those that we have from Guenette (2005). Let's see how much gets lost if we do that, in terms of abundance in the GOA. Hopefully not too much. Check that there are not nomenclature mismatches between species, and fix them if there are.
 ```{r}
-guenette <- read.csv('../data/Guenette.csv', fileEncoding = 'UTF-8-BOM')
-guenette <- guenette %>% select(Common.name,Scientific.name,Proposed.group) %>% mutate(Common.name=toupper(Common.name))
-guenette <- guenette[-nrow(guenette),]
-guenette <- guenette %>% mutate(Proposed.group=str_replace(Proposed.group,', ', '_'))
-
-dat_guenette <- dat_join %>% mutate(Common.Name=toupper(Common.Name)) %>% 
-  left_join(guenette,by=c('Common.Name'='Common.name')) %>%
-  drop_na()
+# guenette <- read.csv('../data/Guenette.csv', fileEncoding = 'UTF-8-BOM')
+# guenette <- guenette %>% select(Common.name,Scientific.name,Proposed.group) %>% mutate(Common.name=toupper(Common.name))
+# guenette <- guenette[-nrow(guenette),]
+# guenette <- guenette %>% mutate(Proposed.group=str_replace(Proposed.group,', ', '_'))
+# 
+# dat_guenette <- dat_join %>% mutate(Common.Name=toupper(Common.Name)) %>% 
+#   left_join(guenette,by=c('Common.Name'='Common.name')) %>%
+#   drop_na()
 
 # now group by event and by proposed group and sum densities
-dat_groups <- dat_guenette %>% group_by(Master.Key,Year,Proposed.group,Lon,Lat) %>% 
-  summarise(Dens=sum(Density_num,na.rm=TRUE)) %>%
-  ungroup() %>%
-  st_as_sf(coords = c('Lon','Lat'), crs = 4326) %>%
+dat_groups <- dat_join %>% st_as_sf(coords = c('Lon','Lat'), crs = 4326) %>%
   st_transform(crs = atlantis_crs)
 ```
-
 
 Draw some maps. Beware that density is not available for all transects because some transects do not have area estimates.
 ```{r}
@@ -91,16 +80,16 @@ dat_groups %>%
   st_crop(atlantis_bbox) %>% # limit this to the plotting region
   #filter(Year==2017) %>%
   ggplot()+
-  geom_sf(aes(color=log1p(Dens)))+
+  geom_sf(aes(color=log1p(Density_num)))+
   scale_color_viridis()+
   geom_sf(data=coast_sf)+
   coord_sf(xlim=c(atlantis_bbox$xmin, atlantis_bbox$xmax),ylim=c(atlantis_bbox$ymin, atlantis_bbox$ymax+50000))+
   theme_bw()+
-  facet_wrap(~Proposed.group, ncol=2)+
+  facet_wrap(~Common.Name, ncol=2)+
   labs(title='Bird density from the North Pacific Pelagic Seabird Database')
 ```
 
-It is a pretty sparse dataset, compared to the bottom trawl data. It does build up if one ignores the year factor though - so much so that plotting becomes an issue. Out-of-season data are a lot more sparse.
+It is a pretty sparse dataset, compared to the bottom trawl data. It does build up if one ignores the year factor though - so much so that plotting becomes an issue. 
 
 ## Overlap with Atlantis
 
@@ -116,12 +105,12 @@ dat_groups_atlantis <- dat_groups %>%
 
 dat_groups_atlantis %>%
   ggplot()+
-  geom_sf(aes(color=log1p(Dens)))+
+  geom_sf(aes(color=log1p(Density_num)))+
   scale_color_viridis()+
   geom_sf(data=coast_sf)+
   coord_sf(xlim=c(atlantis_bbox$xmin, atlantis_bbox$xmax),ylim=c(atlantis_bbox$ymin, atlantis_bbox$ymax))+
   theme_bw()+
-  facet_wrap(~Proposed.group, ncol=2)+
+  facet_wrap(~Common.Name, ncol=2)+
   labs(title='Bird density from the North Pacific Pelagic Seabird Database')
 ```
 
@@ -138,7 +127,7 @@ dat_groups_atlantis <- dat_groups %>%
   st_join(atlantis_box %>% select(.bx0)) %>% 
   drop_na() %>%
   mutate(distance = as.vector(st_distance(geometry,coast_sf))/1000) %>%
-  select(-geometry) # drop geometry column - for some reason here st_set_geometry(NULL) will not take - something happens to the geometry in the spatial join
+  st_set_geometry(NULL) 
 
 # do the same for the grid that sdmTMB will predict on
 load("../data/atlantis_grid_depth.Rdata")
@@ -171,27 +160,38 @@ Seems sensible.
 3. What about zero counts in some hauls? For each haul, we need counts of all four groups, i.e. we need to pad all hauls with zeroes to use SDMs. Do this one species at a time as it is much easier and otherwise.
 ```{r}
 # make a frame with all transects and empty density and species info
-all_obs <- dat_groups_atlantis %>% select(Master.Key,Year,lon,lat,.bx0,distance) %>% distinct() %>%
-  mutate(Proposed.group=NA,Dens=0) %>% select(Master.Key,Proposed.group,Dens,Year,lon,lat,.bx0,distance)
-
-#make a vector of bird groups in Atlantis
-all_groups <- unique(dat_groups_atlantis$Proposed.group)
+all_obs <- dat %>% select(Master.Key,Common.Name,NPPSD.4.Letter.Code,Density) %>% 
+  left_join(tows %>% select(Master.Key,Lon,Lat,Year), by = 'Master.Key') %>%
+  mutate(Density_num=as.numeric(Density)) %>%
+  drop_na() %>%
+  mutate(Common.Name=NA, NPPSD.4.Letter.Code=NA, Density=0, Density_num=0) %>% # set groups to NA and densities to 0
+  distinct() %>%
+  st_as_sf(coords = c('Lon','Lat'), crs = 4326) %>% 
+  st_transform(crs = atlantis_crs) 
+all_obs <- all_obs %>% 
+  mutate(lon = st_coordinates(all_obs)[,1]/1000, # prepare coordinates in km to aid numerical stability in sdmTMB
+         lat = st_coordinates(all_obs)[,2]/1000) %>%
+  st_join(atlantis_box %>% select(.bx0)) %>% 
+  filter(!is.na(.bx0)) %>%
+  mutate(distance = as.vector(st_distance(geometry,coast_sf))/1000) %>%
+  st_set_geometry(NULL) 
 
 # make a function that pulls one group out of the data and stitches transects with 0 observations
 make_bird_data <- function(group) {
-  this_group <- dat_groups_atlantis %>% filter(Proposed.group==group)
+  this_group <- dat_groups_atlantis %>% filter(NPPSD.4.Letter.Code==group)
   # empty transects with respect to this group
   no_obs <- all_obs %>% filter(Master.Key %in% setdiff(all_obs$Master.Key,this_group$Master.Key))
   # bind this to observations
   this_group_complete <- rbind(this_group,no_obs) # row number checks out
   # fill the NAs in the Proposed.group column to match which group we are talking about
-  this_group_complete <- this_group_complete %>% mutate(Proposed.group=group) %>% 
-    set_names(c('haul','year','name','dens','lon','lat','.bx0','distance'))
+  this_group_complete <- this_group_complete %>% 
+    select(-NPPSD.4.Letter.Code,-Density) %>%
+    set_names(c('haul','name','year','dens','lon','lat','.bx0','distance'))
   # write this out
-  write.csv(this_group_complete, paste0('../outputs/',group,'winter.csv'),row.names = FALSE)
+  write.csv(this_group_complete, paste0('../outputs/',group,'.csv'),row.names = FALSE)
 }
 
-purrr::map(all_groups,make_bird_data) 
+purrr::map(nonbreeding,make_bird_data) 
 
 ```
 

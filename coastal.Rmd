@@ -106,6 +106,14 @@ my_dat_sf <- my_dat_sf %>% mutate(scientific_name = purrr::pmap_chr(list(name),b
                                     common_name = purrr::pmap_chr(list(name),bird_names,FALSE))
 ```
 
+## Species in the GOA
+
+Work out how many species are present in the GOA.
+```{r}
+my_dat_sf %>% st_intersection(atlantis_box %>% st_combine) %>% st_set_geometry(NULL) %>% select(scientific_name) %>% distinct() %>% pull() 
+```
+
+
 # Map to Atlantis
 
 Get for each data point which box it belongs to.
@@ -212,7 +220,7 @@ colony_at_sea <- colony_at_sea %>%
 all_IDs <- unique(colony_at_sea$ID)
 
 # shed some variables
-box_thin <- atlantis_box %>% select(.bx0,boundary)
+box_thin <- atlantis_box %>% select(.bx0,botz,boundary)
 
 # pick a unique ID, calculate the area of the intersection with each atlantis box in the model, and scale the n of ind for that colony by the area of the intersection
 box_colony_overlap <- function(this_colony,colony_data,box_data){
@@ -229,7 +237,7 @@ box_colony_overlap <- function(this_colony,colony_data,box_data){
 
 atlantis_abundances <- rbindlist(purrr::map(all_IDs,box_colony_overlap,colony_data=colony_at_sea,box_data=box_thin))
 ```
-The last function call above is very slow (like think 1 h slow.
+The last function call above is very slow (like think 1 h slow).
 
 ```{r}
 head(atlantis_abundances)
@@ -238,16 +246,16 @@ sum(atlantis_abundances$abundance_this_box)
 
 Group this by species and add up abundances by box. Then tie back to common names and then to Atlantis groups. Then add up by group by box. 
 ```{r}
-abundance_by_box <- atlantis_abundances %>% group_by(.bx0,name,common_name) %>% summarise(abundance = sum(abundance_this_box)) %>% ungroup()
+abundance_by_box <- atlantis_abundances %>% group_by(.bx0,botz,boundary,name,common_name) %>% summarise(abundance = sum(abundance_this_box)) %>% ungroup()
 
 # tie back to atlantis groups
 abundance_by_box <- abundance_by_box %>% left_join(key_tmp %>% select(Common.name,Proposed.group), by = c('common_name'='Common.name'))
-abundance_by_box <- abundance_by_box %>% group_by(.bx0,Proposed.group) %>% summarise(abundance = sum(abundance)) %>% ungroup()
+abundance_by_box <- abundance_by_box %>% group_by(.bx0,botz,boundary,Proposed.group) %>% summarise(abundance = sum(abundance)) %>% ungroup()
 ```
 
 Join with box set again for the geometry and map.
 ```{r, fig.width = 10, fig.height=5}
-atlantis_birds <- atlantis_box %>% select(.bx0,area,boundary) %>% left_join(abundance_by_box, by = '.bx0')
+atlantis_birds <- atlantis_box %>% select(.bx0,area,boundary) %>% left_join(abundance_by_box, by = c('.bx0','boundary'))
 
 groups <- unique(atlantis_birds$Proposed.group)
 
@@ -269,3 +277,39 @@ p<- atlantis_birds %>%
 ggsave(paste0(groups[4],'.png'), p, dpi=600, width=10, height=4)
 ```
 Due to the use of the buffers, the total population estimated within the Atlantis domain is ~5.7 million birds, which is less than the estimated 7.2 million mesting seabird in the GOA from [Stephenson and Irons (2003)](http://marineornithology.org/PDF/31_2/31_2_167-173.pdf). Part of the issue is that we are not capturing all species that were present in the original Beringian database. 
+
+Some boxes are empty, so when expanding they are given NA. TUrn those to zeroes, then apply the usual correction of assigning the lowest proportion and taking it away from the highest. 
+```{r}
+atlantis_birds <- atlantis_birds %>% 
+  rowwise() %>%
+  mutate(abundance_new=ifelse(isTRUE(boundary) | .bx0 %in% c(21,40,99),0,abundance)) # set to 0 in boundary and islands
+
+birds_s2_s3 <- atlantis_birds %>% 
+  select(.bx0,botz,boundary,Proposed.group,abundance_new) %>%
+  st_set_geometry(NULL) %>%
+  group_by(Proposed.group) %>%
+  mutate(Prop=as.numeric(abundance_new/sum(abundance_new,na.rm=TRUE))) %>%
+  ungroup() %>%
+  select(-abundance_new) %>%
+  complete(.bx0, nesting(Proposed.group))
+
+# turn NAs to zeroes
+birds_s2_s3$Prop[is.na(birds_s2_s3$Prop)]<-0
+
+# turn zeroes to minimum
+zero_to_min <- function(x){
+  min_prop <- x %>% filter(Prop>0 & boundary==F & botz<0) %>% pull() %>% min()
+  max_prop <- x %>% filter(Prop>0 & boundary==F & botz<0) %>% pull() %>% max()
+  
+  box_no_birds <- x %>% filter(Prop==0 & boundary==F & botz<0) %>% nrow()
+  
+  x$Prop[x$Prop==0 & x$boundary==F & x$botz<0] <- min_prop
+  x$Prop[x$Prop==max_prop] <- x$Prop[x$Prop==max_prop] - (min_prop*box_no_birds)
+  
+  this_group <- x$Proposed.group[1]
+  write.csv(x,paste0(this_group,'_s2_s3.csv'))
+}
+
+lapply(split(birds_s2_s3,birds_s2_s3$Proposed.group), zero_to_min)
+```
+
