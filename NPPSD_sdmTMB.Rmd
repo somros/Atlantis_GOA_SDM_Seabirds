@@ -40,7 +40,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 # Read data
 ```{r}
-nppsd_data <- read.csv('../outputs/Surface_fishwinter.csv')
+nppsd_data <- read.csv('../outputs/Surface_planktonwinter.csv')
 
 atlantis_bgm <- read_bgm('../data/GOA_WGS84_V4_final.bgm')
 atlantis_box <- atlantis_bgm %>% box_sf()
@@ -472,7 +472,7 @@ out <- out %>% arrange(.bx0)
 Write out a .csv.
 ```{r}
 write.csv(x = out, 
-          file = paste0("../winter_dists/",nppsd_data$name[1],"_winter_NPPSD.csv"), 
+          file = paste0("../outputs/pelagic_winter/s/",nppsd_data$name[1],"_winter_NPPSD.csv"), 
           row.names = FALSE)
 ```
 
@@ -495,6 +495,6 @@ val
 
 ```{r}
 write.csv(x = val, 
-          file = paste0("../winter_dists/","validation_",nppsd_data$name[1],"_winter_NPPSD.csv"), 
+          file = paste0("../outputs/pelagic_winter/validation/","validation_",nppsd_data$name[1],"_winter_NPPSD.csv"), 
           row.names = FALSE)
 ```
